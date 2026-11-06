@@ -1,0 +1,1 @@
+"""sql-insights-agent package."""

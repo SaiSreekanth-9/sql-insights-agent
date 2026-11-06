@@ -1,1 +1,187 @@
-# sql-insights-agent
+# SQL Insights Agent — Anomaly Detection + Plain-Language Insights over SQL Results
+
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![LangChain](https://img.shields.io/badge/langchain-optional-green)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
+
+An **anomaly detection and insight agent** for SQL query results: feed it a CSV
+of daily metrics (the stand-in for a query result set), and it flags unusual
+days with z-score and IQR detection, spots sustained level shifts, turns the
+findings into **plain-language insights**, and drafts the email and Slack
+notifications that would deliver them.
+
+## Origin & honesty note
+
+This project is **inspired by** a bullet on my resume — building anomaly
+detection and statistical analysis over SQL query results, with automated
+insights delivered by email, Slack, and in-app notifications. It is a
+**portfolio re-implementation of that idea, built from scratch with
+synthetic sample data**. It was **not** deployed at Eli Lilly or any other
+employer, uses **no real company data**, and makes no claims about
+production metrics, dates, or outcomes from that work. All numbers in the
+bundled sample data are fictional.
+
+## Problem statement
+
+Teams that watch daily metrics (active users, revenue, error rate, latency)
+usually notice problems only when someone eyeballs a dashboard. A spike in
+error rate or a slow drift in latency can sit unnoticed for days. This agent
+automates the first pass: statistical detection over the numbers, a
+human-readable sentence for each finding, and a ready-to-send notification
+draft — so the on-call person gets "error rate spiked to 4.9% on Sep 18"
+instead of a raw table.
+
+## Features
+
+- 📊 **Anomaly detection** — z-score (|z| ≥ 2.5 by default) *and* the 1.5×IQR
+  rule, per metric, with structured findings (date, metric, value, method,
+  score, direction)
+- 📈 **Trend-change detection** — first-half vs second-half median comparison
+  (medians, so a one-day spike can't masquerade as a trend) with percent change
+- 💬 **Plain-language insights** — deterministic templates in demo mode; an
+  optional LLM rewrite (gpt-4o-mini) when `OPENAI_API_KEY` is set
+- ✉️ **Notification drafts** — renders the email subject/body and Slack-style
+  message that *would* be sent. Mock renderers only: **no SMTP, no Slack API,
+  no tokens, nothing is ever sent**
+- 📄 **Markdown report** — data summary, anomalies table, trend changes,
+  insights, and notification drafts in one file
+- 🔌 **Zero-key demo** — `python main.py demo` runs end-to-end with no API key
+  and no langchain installed; core analysis is stdlib `csv`/`statistics`
+  (pandas used only if present)
+
+## Architecture
+
+```
+┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+│  SQL result  │─────▶│    Loader    │─────▶│   Anomalies  │
+│  (CSV file)  │      │ pandas if    │      │ z-score +    │
+│              │      │ present,     │      │ IQR, per     │
+│              │      │ else stdlib  │      │ metric       │
+└──────────────┘      └──────────────┘      └──────┬───────┘
+                                                  │
+┌──────────────┐      ┌──────────────┐             │
+│  Email/Slack │◀─────│   Insights   │◀────────────┤
+│  drafts only │      │  templates   │             │
+│  (no send)   │      │  (+ optional │      ┌──────┴───────┐
+└──────┬───────┘      │  LLM rewrite)│      │    Trends    │
+       │             └──────┬───────┘      │  half vs half│
+       ▼                    │              │  median shift│
+┌──────────────┐            ▼              └──────────────┘
+│   Markdown   │      ┌──────────────┐
+│   report     │◀─────│    Report    │
+└──────────────┘      └──────────────┘
+```
+
+**Flow:** `loader` reads the CSV → `anomalies` and `trends` analyze each
+column → `insights` turns findings into sentences (templates, or an optional
+LLM rewrite) → `notify` renders email/Slack drafts → `report` assembles the
+markdown report. Detection is pure stdlib statistics; the LLM is an optional
+polish step, never a dependency of the pipeline.
+
+## Project structure
+
+```
+sql-insights-agent/
+├── main.py                  # CLI: demo | analyze
+├── requirements.txt
+├── .env.example
+├── src/
+│   ├── __init__.py
+│   ├── config.py            # settings from env (dotenv optional)
+│   ├── loader.py            # CSV -> Metrics (pandas if present, else csv)
+│   ├── anomalies.py         # z-score + IQR detection
+│   ├── trends.py            # first-half vs second-half median shifts
+│   ├── insights.py          # template insights (+ optional LLM rewrite)
+│   ├── notify.py            # mock email/Slack draft renderers
+│   └── report.py            # markdown report builder
+├── data/
+│   ├── README.md            # what the sample data is / planted patterns
+│   └── sample_metrics.csv   # synthetic 30-day metrics
+└── examples/
+    ├── sample_outputs.md    # real `python main.py demo` output
+    └── sample_report.md     # generated by `python main.py demo`
+```
+
+## Installation
+
+```bash
+git clone <your-repo-url> sql-insights-agent
+cd sql-insights-agent
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env   # optional: only needed for the LLM rewrite
+```
+
+The demo needs **no API key** — `langchain`, `python-dotenv`, `pandas`, and
+`numpy` are all optional at runtime. Install the requirements only if you
+want the LLM rewrite path or pandas-backed loading.
+
+## Usage
+
+```bash
+# Demo: analyze the bundled synthetic data, print findings, write the report
+python main.py demo
+
+# Analyze your own CSV (same columns as data/sample_metrics.csv)
+python main.py analyze --input my_metrics.csv --output reports/my_report.md
+
+# Tune detection sensitivity
+python main.py analyze --z-threshold 3.0 --output reports/strict_report.md
+```
+
+Example run (`python main.py demo`):
+
+```
+sql-insights-agent — 30 days (2026-09-01 to 2026-09-30)
+
+Anomalies detected: 6
+  2026-09-12 | revenue_usd = 9850 (z-score, score 5.28, high vs mean 5251.43)
+  2026-09-18 | error_rate_pct = 4.9 (z-score, score 5.30, high vs mean 1.15)
+  2026-09-25 | avg_latency_ms = 640 (z-score, score 5.34, high vs mean 215.07)
+
+Trend changes: 1
+  active_users: up 41.6% (1059.00 -> 1500.00 median, split at 2026-09-16)
+
+Insights:
+  - On 2026-09-12, revenue spiked to $9,850 — well above the 30-day average of $5,251 (z-score score 5.28).
+  - On 2026-09-18, error rate spiked to 4.90% — well above the 30-day average of 1.15% (z-score score 5.30).
+  - On 2026-09-25, average latency spiked to 640 ms — well above the 30-day average of 215 ms (z-score score 5.34).
+  - Active users shifted up by 41.6% between the first and second half of the period (1,059 → 1,500 median, split 2026-09-16) — a sustained level change, not a one-day blip.
+
+Sample report written to examples/sample_report.md
+Demo mode: insights are deterministic templates; no notifications were sent.
+```
+
+## Configuration
+
+All settings live in `.env` (see `.env.example`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OPENAI_API_KEY` | — | **Optional.** Leave blank for deterministic template insights; set it to enable the LLM rewrite in `src/insights.py` |
+| `Z_THRESHOLD` | `2.5` | z-score threshold for anomalies (\|z\| ≥ threshold) |
+| `IQR_MULTIPLIER` | `1.5` | IQR fence multiplier for the IQR rule |
+
+## Sample outputs
+
+See [examples/sample_outputs.md](examples/sample_outputs.md) for the full
+`python main.py demo` output, and
+[examples/sample_report.md](examples/sample_report.md) for the generated
+report, including the email and Slack notification drafts.
+
+## Limitations & future work
+
+- CSV input only — the next step is a real SQL connector (run the query, analyze
+  the result set directly) instead of a CSV stand-in.
+- Fixed first-half/second-half split for trends; rolling-window / changepoint
+  detection would locate the exact shift day.
+- Z-score assumes roughly symmetric data; skewed metrics (e.g. revenue) are
+  better served by the IQR rule or a log transform.
+- Notifications are drafts only — wiring a real SMTP/Slack sender is a
+  separate, credentialed step, deliberately left out of this repo.
+- Planned: per-metric thresholds in config, severity ranking of findings,
+  a Streamlit dashboard.
+
+## License
+
+MIT — see [LICENSE](LICENSE) (add one, e.g. via `gh repo create` template or choosealicense.com).
